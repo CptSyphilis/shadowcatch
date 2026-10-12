@@ -1,0 +1,4 @@
+lightkurve
+astroquery
+matplotlib
+customtkinter
