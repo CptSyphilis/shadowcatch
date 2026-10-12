@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import re
+import threading
 import time
 import urllib.request
 import warnings
@@ -76,20 +77,41 @@ FALSE_POSITIVE = {"FP", "FA", "EB", "APC"}
 MAST_TRIES = 3
 T = TypeVar("T")
 MAST_WAIT = 30
+MAST_LIMIT = 180
+DOWNLOAD_LIMIT = 900
 
 
 def quiet(*_):
     pass
 
 
-def retry(call: Callable[[], T], log=print, tries=MAST_TRIES, wait=MAST_WAIT) -> T:
+def limited(call: Callable[[], T], limit: float) -> T:
+    box: dict[str, Any] = {}
+
+    def work():
+        try:
+            box["value"] = call()
+        except BaseException as e:
+            box["error"] = e
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(limit)
+    if worker.is_alive():
+        raise TimeoutError(f"no answer within {limit:.0f} s")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def retry(call: Callable[[], T], log=print, tries=MAST_TRIES, wait=MAST_WAIT, limit=MAST_LIMIT) -> T:
     for attempt in range(1, tries):
         try:
-            return call()
+            return limited(call, limit)
         except (TimeoutError, ConnectionError, requests.RequestException, RemoteServiceError) as e:
             log(f"The archive did not answer ({type(e).__name__}) - trying again in {wait * attempt} s")
             time.sleep(wait * attempt)
-    return call()
+    return limited(call, limit)
 
 
 def load_index():
@@ -185,7 +207,7 @@ def download(target, max_sectors, log=print, progress=quiet):
             curves.append(lk.read(path))
         else:
             progress(n / len(chosen), f"Downloading light curve {n + 1}/{len(chosen)}")
-            curves.append(retry(lambda: results[i].download(), log))
+            curves.append(retry(lambda: results[i].download(), log, limit=DOWNLOAD_LIMIT))
             fresh += 1
     log(f"Used {len(chosen) - fresh} light curve(s) from disk, downloaded {fresh}")
     progress(1, "Stitching light curves")
@@ -1006,7 +1028,7 @@ def recheck(signal, star, log=print):
     curves = []
     for sector in chosen:
         try:
-            lc = retry(lambda: found[best[sector]].download(quality_bitmask="default"), log)
+            lc = retry(lambda: found[best[sector]].download(quality_bitmask="default"), log, limit=DOWNLOAD_LIMIT)
         except Exception as e:
             log(f"Could not download sector {sector}: {e}")
             continue
@@ -1389,7 +1411,7 @@ def pixel_check(signal, star, log=print, max_sectors=4, neighbors=None, enough=6
         tpf = None
         for fresh in (False, True):
             try:
-                tpf = found[i].download(quality_bitmask="default", cache=not fresh)
+                tpf = limited(lambda: found[i].download(quality_bitmask="default", cache=not fresh), DOWNLOAD_LIMIT)
                 if tpf is None:
                     raise ValueError("the archive returned no file")
                 tpf.flux.shape

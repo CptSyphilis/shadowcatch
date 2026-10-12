@@ -1,5 +1,6 @@
 import argparse
 import math
+import time
 import warnings
 from collections import Counter
 from typing import Any
@@ -8,7 +9,7 @@ warnings.filterwarnings("ignore")
 from astroquery.ipac.nexsci.nasa_exoplanet_archive import NasaExoplanetArchive
 from astroquery.mast import Catalogs, Observations
 
-from core import retry
+from core import load_index, retry, save_index
 
 archive: Any = NasaExoplanetArchive
 observations: Any = Observations
@@ -19,6 +20,7 @@ NORTH_POLE = (270.0, 66.56)
 MAX_STAR_RADIUS = 3.0
 RING_STEP = 2.0
 RINGS = 6
+PATCH_MAX_AGE = 7 * 86400
 
 
 def known_tics():
@@ -27,6 +29,11 @@ def known_tics():
 
 
 def observed_tics(ra, dec, box):
+    key = f"{ra},{dec},{box}"
+    index = load_index()
+    cached = index.setdefault("patches", {}).get(key)
+    if cached and time.time() - cached["time"] < PATCH_MAX_AGE:
+        return Counter({int(tic): n for tic, n in cached["counts"].items()})
     width = box / max(math.cos(math.radians(dec)), 0.1)
     obs = retry(lambda: observations.query_criteria(
         obs_collection="TESS",
@@ -35,7 +42,11 @@ def observed_tics(ra, dec, box):
         s_ra=[ra - width, ra + width],
         s_dec=[dec - box, dec + box],
     ))
-    return Counter(int(name) for name in obs["target_name"] if str(name).isdigit())
+    counts = Counter(int(name) for name in obs["target_name"] if str(name).isdigit())
+    index = load_index()
+    index.setdefault("patches", {})[key] = {"time": time.time(), "counts": {str(tic): n for tic, n in counts.items()}}
+    save_index(index)
+    return counts
 
 
 def star_params(tics):
