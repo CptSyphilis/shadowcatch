@@ -8,6 +8,8 @@ warnings.filterwarnings("ignore")
 from astroquery.ipac.nexsci.nasa_exoplanet_archive import NasaExoplanetArchive
 from astroquery.mast import Catalogs, Observations
 
+from core import retry
+
 archive: Any = NasaExoplanetArchive
 observations: Any = Observations
 catalogs: Any = Catalogs
@@ -20,19 +22,19 @@ RINGS = 6
 
 
 def known_tics():
-    table = archive.query_criteria(table="toi", select="tid")
+    table = retry(lambda: archive.query_criteria(table="toi", select="tid"))
     return {int(t) for t in table["tid"]}
 
 
 def observed_tics(ra, dec, box):
     width = box / max(math.cos(math.radians(dec)), 0.1)
-    obs = observations.query_criteria(
+    obs = retry(lambda: observations.query_criteria(
         obs_collection="TESS",
         dataproduct_type="timeseries",
         provenance_name="SPOC",
         s_ra=[ra - width, ra + width],
         s_dec=[dec - box, dec + box],
-    )
+    ))
     return Counter(int(name) for name in obs["target_name"] if str(name).isdigit())
 
 
@@ -40,7 +42,7 @@ def star_params(tics):
     params = {}
     tics = list(tics)
     for i in range(0, len(tics), 500):
-        table = catalogs.query_criteria(catalog="Tic", ID=tics[i : i + 500])
+        table = retry(lambda: catalogs.query_criteria(catalog="Tic", ID=tics[i : i + 500]))
         for row in table:
             tmag = None if row["Tmag"] is None or math.isnan(row["Tmag"]) else float(row["Tmag"])
             rad = None if row["rad"] is None or math.isnan(row["rad"]) else float(row["rad"])

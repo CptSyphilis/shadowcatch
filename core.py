@@ -8,7 +8,7 @@ import time
 import urllib.request
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 warnings.filterwarnings("ignore", message=".*tpfmodel submodule.*")
 import lightkurve as lk
@@ -24,6 +24,7 @@ for mast in (Observations, Catalogs):
     mast._portal_api_connection.TIMEOUT = mast_conf.timeout
     mast._service_api_connection.TIMEOUT = mast_conf.timeout
 import numpy as np
+import requests
 from astropy.timeseries import BoxLeastSquares
 from matplotlib.figure import Figure
 from scipy.ndimage import median_filter
@@ -70,10 +71,23 @@ SATURATION_TMAG = 7.5
 EXOFOP = "https://exofop.ipac.caltech.edu/tess"
 CONTAMINATION_NOTE = 0.1
 FALSE_POSITIVE = {"FP", "FA", "EB", "APC"}
+MAST_TRIES = 3
+T = TypeVar("T")
+MAST_WAIT = 30
 
 
 def quiet(*_):
     pass
+
+
+def retry(call: Callable[[], T], log=print, tries=MAST_TRIES, wait=MAST_WAIT) -> T:
+    for attempt in range(1, tries):
+        try:
+            return call()
+        except (TimeoutError, ConnectionError, requests.RequestException) as e:
+            log(f"The archive did not answer ({type(e).__name__}) - trying again in {wait * attempt} s")
+            time.sleep(wait * attempt)
+    return call()
 
 
 def load_index():
@@ -145,7 +159,7 @@ def download(target, max_sectors, log=print, progress=quiet):
         log(f"Have {len(on_disk)} sector(s) on disk - checking the archive for a closer-together set")
 
     progress(0, "Searching the TESS archive")
-    results = lk.search_lightcurve(target, mission="TESS", author=["SPOC", "TESS-SPOC"])
+    results = retry(lambda: lk.search_lightcurve(target, mission="TESS", author=["SPOC", "TESS-SPOC"]), log)
     if len(results) == 0:
         raise ValueError(f"No TESS light curves found for {target}")
     table = results.table
@@ -169,7 +183,7 @@ def download(target, max_sectors, log=print, progress=quiet):
             curves.append(lk.read(path))
         else:
             progress(n / len(chosen), f"Downloading light curve {n + 1}/{len(chosen)}")
-            curves.append(results[i].download())
+            curves.append(retry(lambda: results[i].download(), log))
             fresh += 1
     log(f"Used {len(chosen) - fresh} light curve(s) from disk, downloaded {fresh}")
     progress(1, "Stitching light curves")
@@ -589,7 +603,7 @@ def tic_params(star, log=print):
         return cached
     try:
         catalogs: Any = Catalogs
-        table = catalogs.query_criteria(catalog="Tic", ID=star["tic"])
+        table = retry(lambda: catalogs.query_criteria(catalog="Tic", ID=star["tic"]), log)
     except Exception as e:
         log(f"Could not look up the star in the TESS Input Catalog: {e}")
         return None
@@ -950,7 +964,7 @@ def recheck(signal, star, log=print):
         return None
     used = set(star.get("sectors") or [])
     try:
-        found = lk.search_lightcurve(f"TIC {star['tic']}", mission="TESS", author=["SPOC", "TESS-SPOC"])
+        found = retry(lambda: lk.search_lightcurve(f"TIC {star['tic']}", mission="TESS", author=["SPOC", "TESS-SPOC"]), log)
     except Exception as e:
         log(f"Could not search for other sectors: {e}")
         return None
@@ -970,7 +984,7 @@ def recheck(signal, star, log=print):
     curves = []
     for sector in chosen:
         try:
-            lc = found[best[sector]].download(quality_bitmask="default")
+            lc = retry(lambda: found[best[sector]].download(quality_bitmask="default"), log)
         except Exception as e:
             log(f"Could not download sector {sector}: {e}")
             continue
@@ -1332,7 +1346,7 @@ def pixel_check(signal, star, log=print, max_sectors=4, neighbors=None, enough=6
         log("Star is too bright for the pixel check (saturated pixels)")
         return {"verdict": "saturated", "sectors": []}
     try:
-        found = lk.search_targetpixelfile(f"TIC {star['tic']}", mission="TESS", author="SPOC", exptime=120)
+        found = retry(lambda: lk.search_targetpixelfile(f"TIC {star['tic']}", mission="TESS", author="SPOC", exptime=120), log)
     except Exception as e:
         log(f"Could not search for pixel data: {e}")
         return None

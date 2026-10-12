@@ -28,7 +28,7 @@ CASES = [
     ("TIC 31514067", 4, [(None, NOT_NEW, "")]),
     ("TIC 41335086", 4, [(None, NOT_NEW, "")]),
     ("TIC 374942490", 4, [(None, NOT_NEW, "")]),
-    ("TIC 149992221", 4, [(6.990, NOT_NEW, "not confirmed")]),
+    ("TIC 149992221", 4, [(None, NOT_NEW, ""), (6.990, RECHECK, "missing")]),
     ("TIC 374861595", 4, [(None, BINARY, "too big")]),
 ]
 
