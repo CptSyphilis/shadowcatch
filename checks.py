@@ -30,6 +30,7 @@ CASES = [
     ("TIC 374942490", 4, [(None, NOT_NEW, "")]),
     ("TIC 149992221", 4, [(None, NOT_NEW, ""), (6.990, RECHECK, "missing")]),
     ("TIC 374861595", 4, [(None, BINARY, "too big")]),
+    ("TIC 167201539", 4, [(9.469, NOT_NEW, "catalogued binary (TESS EB)")]),
 ]
 
 

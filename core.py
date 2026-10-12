@@ -69,6 +69,7 @@ GRID_HALF = 5
 PIXEL_SNR = 4.0
 SATURATION_TMAG = 7.5
 EXOFOP = "https://exofop.ipac.caltech.edu/tess"
+TESS_EBS = "J/ApJS/258/16"
 CONTAMINATION_NOTE = 0.1
 FALSE_POSITIVE = {"FP", "FA", "EB", "APC"}
 MAST_TRIES = 3
@@ -777,7 +778,7 @@ def catalog_check(star, log=print):
         return None
     index = load_index()
     cached = index.setdefault("catalogs", {}).get(str(star["tic"]))
-    if cached:
+    if cached and "tessebs" in cached:
         return cached
     try:
         import astropy.units as u
@@ -788,6 +789,8 @@ def catalog_check(star, log=print):
         center = SkyCoord(star["ra"], star["dec"], unit="deg")
         vizier: Any = Vizier(columns=["Name", "RAJ2000", "DEJ2000", "Type", "Period"], row_limit=-1)
         tables = vizier.query_region(center, radius=NEIGHBOR_RADIUS * u.arcsec, catalog="B/vsx/vsx")
+        ebs: Any = Vizier(columns=["TIC", "RAJ2000", "DEJ2000", "Per"], row_limit=-1)
+        eb_tables = ebs.query_region(center, radius=NEIGHBOR_RADIUS * u.arcsec, catalog=TESS_EBS)
         simbad = Simbad()
         simbad.add_votable_fields("otype")
         nearby = simbad.query_region(center, radius=5 * u.arcsec)
@@ -801,13 +804,20 @@ def catalog_check(star, log=print):
         for row, sep in zip(table, seps):
             period = None if np.ma.is_masked(row["Period"]) else float(row["Period"])
             vsx.append([float(sep), str(row["Name"]), str(row["Type"]), period])
+    tessebs = []
+    if eb_tables:
+        table = eb_tables[0]
+        seps = np.atleast_1d(center.separation(SkyCoord(table["RAJ2000"], table["DEJ2000"], unit="deg")).arcsec)
+        for row, sep in zip(table, seps):
+            period = None if np.ma.is_masked(row["Per"]) else float(row["Per"])
+            tessebs.append([float(sep), int(row["TIC"]), period])
     types = []
     if nearby is not None:
         for row in nearby:
             otype = str(row["otype"])
             if not otype.startswith("Pl"):
                 types.append([str(row["main_id"]), otype])
-    result = {"vsx": sorted(vsx), "simbad": types}
+    result = {"vsx": sorted(vsx), "tessebs": sorted(tessebs), "simbad": types}
     index["catalogs"][str(star["tic"])] = result
     save_index(index)
     return result
@@ -831,6 +841,17 @@ def read_catalogs(signal, catalogs):
             notes.append(f"VSX lists this star ({name}) as a star with a known transiting planet ({cycle}) - compare the periods.")
         elif here:
             notes.append(f"VSX lists this star ({name}) as a {kind} ({cycle}). Its own brightness changes can fake or hide dips.")
+    for sep, tic, period in catalogs.get("tessebs", []):
+        here = sep < 10
+        where = "this star" if here else f"a star {sep:.0f}\" away (TIC {tic})"
+        match = harmonic(signal["period"], period) if period else None
+        if match:
+            relabel = relabel or ("catalogued binary (TESS EB)" if here else "catalogued binary nearby (TESS EB)")
+            same = "the same period" if match == (1, 1) else f"a matching period (this signal is {match[0]}/{match[1]} of it)"
+            notes.append(f"The TESS eclipsing binary catalog lists {where} with {same}: {period:.4f} d - that is almost certainly what made this dip.")
+        elif here or sep < 60:
+            cycle = f"period {period:.4f} d" if period else "no period listed"
+            notes.append(f"The TESS eclipsing binary catalog lists {where} ({cycle}). Different period from this signal, but be careful.")
     for main_id, otype in catalogs["simbad"]:
         words = SIMBAD_WORDS.get(otype)
         if not words:
