@@ -16,6 +16,7 @@ import lightkurve as lk
 logging.getLogger("lightkurve").setLevel(logging.ERROR)
 from astroquery.mast import Catalogs, Observations
 from astroquery.mast import conf as mast_conf
+from astroquery.exceptions import RemoteServiceError
 from astroquery.simbad import conf as simbad_conf
 
 mast_conf.timeout = 120
@@ -85,7 +86,7 @@ def retry(call: Callable[[], T], log=print, tries=MAST_TRIES, wait=MAST_WAIT) ->
     for attempt in range(1, tries):
         try:
             return call()
-        except (TimeoutError, ConnectionError, requests.RequestException) as e:
+        except (TimeoutError, ConnectionError, requests.RequestException, RemoteServiceError) as e:
             log(f"The archive did not answer ({type(e).__name__}) - trying again in {wait * attempt} s")
             time.sleep(wait * attempt)
     return call()
