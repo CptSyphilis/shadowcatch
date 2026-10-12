@@ -1,5 +1,6 @@
 import argparse
 import math
+import re
 import time
 import warnings
 from collections import Counter
@@ -21,6 +22,8 @@ MAX_STAR_RADIUS = 3.0
 RING_STEP = 2.0
 RINGS = 6
 PATCH_MAX_AGE = 7 * 86400
+VSX_MATCH = 10
+GIANT_VARIABLES = {"M", "SR", "SRA", "SRB", "SRC", "SRD", "SRS", "L", "LB", "LC", "LPV", "RV", "RVA", "RVB", "ACYG", "CEP", "DCEP", "DCEPS", "CW", "CWA", "CWB"}
 
 
 def known_tics():
@@ -57,8 +60,36 @@ def star_params(tics):
         for row in table:
             tmag = None if row["Tmag"] is None or math.isnan(row["Tmag"]) else float(row["Tmag"])
             rad = None if row["rad"] is None or math.isnan(row["rad"]) else float(row["rad"])
-            params[int(row["ID"])] = (tmag, rad, str(row["lumclass"]) == "GIANT")
+            params[int(row["ID"])] = (tmag, rad, str(row["lumclass"]) == "GIANT", float(row["ra"]), float(row["dec"]))
     return params
+
+
+def giant_variables(stars):
+    index = load_index()
+    known = index.setdefault("vsx_giants", {})
+    todo = [(tic, ra, dec) for tic, ra, dec in stars if str(tic) not in known]
+    for i in range(0, len(todo), 500):
+        chunk = todo[i : i + 500]
+        try:
+            import astropy.units as u
+            from astropy.coordinates import SkyCoord
+            from astroquery.vizier import Vizier
+
+            vizier: Any = Vizier(columns=["Type"], row_limit=-1)
+            center = SkyCoord([ra for _, ra, _ in chunk], [dec for _, _, dec in chunk], unit="deg")
+            tables = vizier.query_region(center, radius=VSX_MATCH * u.arcsec, catalog="B/vsx/vsx")
+        except Exception as e:
+            print(f"Could not check VSX for giant variables: {e}")
+            break
+        found = set()
+        if tables:
+            for row in tables[0]:
+                if set(re.split(r"[/+:|()]", str(row["Type"]))) & GIANT_VARIABLES:
+                    found.add(int(row["_q"]) - 1)
+        for k, (tic, _, _) in enumerate(chunk):
+            known[str(tic)] = k in found
+        save_index(index)
+    return {tic for tic, _, _ in stars if known.get(str(tic))}
 
 
 def detectability(tmag, rad, sectors):
@@ -69,10 +100,12 @@ def detectability(tmag, rad, sectors):
 
 def rank(counts):
     params = star_params(counts)
+    unknown = [(tic, p[3], p[4]) for tic, p in params.items() if tic in counts and p[1] is None and not p[2]]
+    variables = giant_variables(unknown)
     ranked = []
     for tic, sectors in counts.items():
-        tmag, rad, giant = params.get(tic, (None, None, False))
-        if giant or (rad is not None and rad > MAX_STAR_RADIUS):
+        tmag, rad, giant, *_ = params.get(tic, (None, None, False))
+        if giant or tic in variables or (rad is not None and rad > MAX_STAR_RADIUS):
             continue
         ranked.append((detectability(tmag, rad, sectors), tic, sectors, tmag, rad))
     return sorted(ranked, reverse=True)
