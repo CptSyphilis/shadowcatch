@@ -1003,7 +1003,7 @@ def read_exofop(signal, exofop):
     return relabel, notes
 
 
-def recheck(signal, star, log=print):
+def recheck(signal, star, log=print, flat=None):
     if star["tic"] is None:
         return None
     used = set(star.get("sectors") or [])
@@ -1036,10 +1036,10 @@ def recheck(signal, star, log=print):
             curves.append(lc)
     if not curves:
         return None
-    flat = stitch([clean(lc.normalize())[0] for lc in curves])
-    t = flat.time.value
-    flux = np.asarray(flat.flux.value, dtype=float)
-    err = np.asarray(flat.flux_err.value, dtype=float)
+    flat_other = stitch([clean(lc.normalize())[0] for lc in curves])
+    t = flat_other.time.value
+    flux = np.asarray(flat_other.flux.value, dtype=float)
+    err = np.asarray(flat_other.flux_err.value, dtype=float)
     period, dur, expected = signal["period"], signal["duration"], signal["depth"]
     bls = BoxLeastSquares(t, flux, err)
     def strict(center):
@@ -1049,7 +1049,7 @@ def recheck(signal, star, log=print):
     result = strict(period)
     k = int(np.argmax(result.power))
     best_period, t0 = float(result.period[k]), float(result.transit_time[k])
-    transits = count_transits(flat, best_period, t0, dur)
+    transits = count_transits(flat_other, best_period, t0, dur)
     report = {"sectors": chosen, "transits": transits, "expected": expected}
     if transits < 2:
         return {**report, "verdict": "too little data"}
@@ -1068,13 +1068,33 @@ def recheck(signal, star, log=print):
     loose = season_depth(t, flux, err, period, dur)
     if loose is not None:
         report.update(loose_depth=loose[0], loose_err=loose[1])
+    if flat is not None:
+        joined = stitch([flat, flat_other])
+        report.update(ephemeris=joint_ephemeris(joined, signal))
     if expected - depth > 3 * depth_err and depth < 0.5 * expected and loose is not None and loose[0] < 0.75 * expected:
         return {**report, "verdict": "missing"}
     if expected < floor and transits >= 3:
         return {**report, "verdict": "chance level"}
     if depth > 3 * depth_err and depth > report["floor"] and depth >= 0.5 * expected and transits >= 3:
         return {**report, "verdict": "seen again"}
+    if depth < floor and expected - depth > 3 * depth_err and transits >= 3:
+        return {**report, "verdict": "too weak"}
     return {**report, "verdict": "unclear"}
+
+
+def joint_ephemeris(lc, signal):
+    t = lc.time.value
+    flux = np.asarray(lc.flux.value, dtype=float)
+    err = np.asarray(lc.flux_err.value, dtype=float)
+    period, t0, dur = signal["period"], signal["t0"], signal["duration"]
+    step = min(period * dur / max(np.ptp(t), 1) / 4, 2 * RECHECK_WINDOW * period / 2000)
+    result = BoxLeastSquares(t, flux, err).power(np.arange(period * (1 - RECHECK_WINDOW), period * (1 + RECHECK_WINDOW), step), [dur])
+    k = int(np.argmax(result.power))
+    best, when = float(result.period[k]), float(result.transit_time[k])
+    epoch = when + np.round((t0 - when) / best) * best
+    if abs(epoch - t0) > dur:
+        return None
+    return [best, float(epoch)]
 
 
 def season_depth(t, flux, err, period, dur):
@@ -1124,6 +1144,11 @@ def recheck_words(check):
         return (
             f"Chance-sized: {measured}. Even with far more data, folding at random periods turns up dips this deep, "
             "so a dip this shallow can't be told apart from noise."
+        )
+    if check["verdict"] == "too weak":
+        return (
+            f"Too weak in other TESS data: {measured}. The other sectors would have shown a dip this deep, "
+            "but what they show is no bigger than chance and well short of the expected depth."
         )
     if check["verdict"] == "seen again":
         return f"Seen again in independent TESS data: {measured}. Good sign - a real repeating dip."
@@ -1402,9 +1427,12 @@ def pixel_check(signal, star, log=print, max_sectors=4, neighbors=None, enough=6
     numbers = np.asarray(found.table["sequence_number"]).astype(int).tolist()
     wanted = set(star.get("sectors") or [])
     order = sorted(range(len(found)), key=lambda i: (numbers[i] not in wanted, -numbers[i]))
+    ephemeris = (signal.get("recheck") or {}).get("ephemeris")
+    if ephemeris:
+        signal = {**signal, "period": ephemeris[0], "t0": ephemeris[1]}
     results = []
     for i in order[:max_sectors]:
-        if sum(r["transits"] for r in results) >= enough:
+        if sum(r["transits"] for r in results) >= enough and any(r["snr"] >= PIXEL_SNR for r in results):
             break
         sector = numbers[i]
         log(f"Getting pixel data for sector {sector} (pixel check)")
@@ -1637,7 +1665,7 @@ def describe(signal, star):
         lines.append(
             "VERDICT  Probably not real. TESS watched this star in other sectors too, and the dip is not there "
             "at the depth it should have. Real planets show up every time; noise and stellar wobbles don't."
-            if "missing" in label else
+            if "missing" in label or "too weak" in label else
             "VERDICT  Probably not real. The dip is no deeper than what random noise produces in this star's other "
             "TESS data, so there is nothing to tell it apart from chance."
         )
@@ -1744,11 +1772,13 @@ def run(target, sectors=10, max_signals=3, min_sde=7.0, log=print, progress=quie
             signal["label"] = relabel or signal["label"]
         if signal["label"] == "NEW CANDIDATE":
             plots((i - 1) / len(signals), "Checking the signal in other TESS sectors")
-            signal["recheck"] = recheck(signal, star, log)
+            signal["recheck"] = recheck(signal, star, log, flat)
             if signal["recheck"] and signal["recheck"]["verdict"] == "missing":
                 signal["label"] = "not confirmed (missing in other sectors)"
             elif signal["recheck"] and signal["recheck"]["verdict"] == "chance level":
                 signal["label"] = "not confirmed (chance-sized dip)"
+            elif signal["recheck"] and signal["recheck"]["verdict"] == "too weak":
+                signal["label"] = "not confirmed (too weak in other sectors)"
         if signal["label"] == "NEW CANDIDATE":
             if neighbors is False:
                 neighbors = gaia_neighbors(star, log)
