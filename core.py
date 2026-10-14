@@ -297,13 +297,14 @@ def search(flat, max_signals, min_sde, progress=quiet):
         GRID_DURATIONS, minimum_period=MIN_PERIOD, maximum_period=max(baseline / 2, 1.0), frequency_factor=10
     )
     keep = np.ones(len(t), dtype=bool)
+    allowed = np.ones(len(periods), dtype=bool)
     signals = []
     for n in range(max_signals):
-        if keep.sum() < 0.2 * len(t):
+        if keep.sum() < 0.2 * len(t) or allowed.sum() < 100:
             break
         step = lambda f, n=n: progress((n + f) / max_signals, f"Searching for signal {n + 1}/{max_signals}")
         bls, power, period, t0, duration, depth = periodogram(
-            t[keep], y[keep], None if dy is None else dy[keep], periods, step
+            t[keep], y[keep], None if dy is None else dy[keep], periods[allowed], step
         )
         sde = (power.max() - power.mean()) / power.std()
         if sde < min_sde:
@@ -315,12 +316,13 @@ def search(flat, max_signals, min_sde, progress=quiet):
             "duration": duration,
             "depth": depth,
             "sde": sde,
-            "periods": periods,
+            "periods": periods[allowed],
             "power": power,
             "lc": remaining,
             "transits": count_transits(remaining, period, t0, duration),
         })
         keep &= ~bls.transit_mask(t, period, duration * 1.5, t0)
+        allowed &= np.abs(periods - period) / period >= 0.01
     progress(1, "Search done")
     return signals
 
