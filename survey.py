@@ -23,6 +23,38 @@ SIGNAL_TOLERANCE = 0.002
 NOT_SHARED = ("known", "alias of", "repeat of")
 MIN_SCORE = 3.0
 SHARED_COLUMN = HEADER.index("shared_period_with")
+LOG = core.OUTPUT / "survey.log"
+
+
+class Tee:
+    def __init__(self, stream, log):
+        self.stream = stream
+        self.log = log
+
+    def write(self, text):
+        self.stream.write(text)
+        self.log.write(text)
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+        self.log.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def log_to_file():
+    core.OUTPUT.mkdir(exist_ok=True)
+    log = open(LOG, "a", buffering=1)
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        try:
+            same = os.path.samestat(os.fstat(stream.fileno()), os.stat(LOG))
+        except (OSError, ValueError, io.UnsupportedOperation):
+            same = False
+        if not same:
+            setattr(sys, name, Tee(stream, log))
 
 
 def append_candidates(tic, signals):
@@ -135,6 +167,7 @@ def main():
     for stream in (sys.stdout, sys.stderr):
         if isinstance(stream, io.TextIOWrapper):
             stream.reconfigure(line_buffering=True)
+    log_to_file()
 
     print(f"\n##### Shadowcatch survey started {time.strftime('%Y-%m-%d %H:%M:%S')} #####")
     print("Fetching TOI list...")
