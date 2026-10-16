@@ -24,6 +24,7 @@ NOT_SHARED = ("known", "alias of", "repeat of")
 MIN_SCORE = 3.0
 SHARED_COLUMN = HEADER.index("shared_period_with")
 LOG = core.OUTPUT / "survey.log"
+PAUSE_FILE = core.OUTPUT / "survey.paused"
 
 
 class Tee:
@@ -153,6 +154,25 @@ def build_queue(args, tois, done):
     return queue
 
 
+def set_paused(paused):
+    core.OUTPUT.mkdir(exist_ok=True)
+    if paused:
+        PAUSE_FILE.touch()
+        print("Survey will pause at its next step; resume with: survey.py --resume")
+    else:
+        PAUSE_FILE.unlink(missing_ok=True)
+        print("Survey resumed")
+
+
+def wait_if_paused():
+    if not PAUSE_FILE.exists():
+        return
+    print(f"  Paused {time.strftime('%H:%M:%S')}")
+    while PAUSE_FILE.exists():
+        time.sleep(5)
+    print(f"  Resumed {time.strftime('%H:%M:%S')}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Shadowcatch survey: search many TESS stars with no TOI and collect new candidates")
     parser.add_argument("--ra", type=float, help="search only around this point (default: work outward from the ecliptic poles)")
@@ -164,7 +184,12 @@ def main():
     parser.add_argument("--min-sde", type=float, default=7.0)
     parser.add_argument("--min-score", type=float, default=MIN_SCORE, help="skip stars where a 2-Earth planet would be weaker than this (expected SNR)")
     parser.add_argument("--redo", action="store_true", help="search stars already surveyed again")
+    parser.add_argument("--pause", action="store_true", help="pause a running survey at its next step")
+    parser.add_argument("--resume", action="store_true", help="let a paused survey go on")
     args = parser.parse_args()
+    if args.pause or args.resume:
+        set_paused(args.pause)
+        return
     for stream in (sys.stdout, sys.stderr):
         if isinstance(stream, io.TextIOWrapper):
             stream.reconfigure(line_buffering=True)
@@ -195,7 +220,7 @@ def main():
         print(f"=== [{n}/{len(queue)}] TIC {tic}  (Tmag {tmag}, {size}, score {score:.1f}) ===")
         start = time.time()
         try:
-            result = core.run(f"TIC {tic}", args.sectors, args.signals, args.min_sde, log=lambda m: print("  " + m))
+            result = core.run(f"TIC {tic}", args.sectors, args.signals, args.min_sde, log=lambda m: (wait_if_paused(), print("  " + m)), progress=lambda *_: wait_if_paused())
         except Exception as e:
             traceback.print_exc()
             errors += 1

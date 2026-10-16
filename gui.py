@@ -361,6 +361,8 @@ class App(ctk.CTk):
         self.toolbar = None
         self.star_text = ""
         self.running = False
+        self.resume = threading.Event()
+        self.resume.set()
         self.log_open = False
         sans = pick_family("Fira Sans", "Ubuntu Sans", "Cantarell")
         narrow = pick_family("Fira Sans Condensed", "Ubuntu Sans", sans)
@@ -403,8 +405,8 @@ class App(ctk.CTk):
         ctk.CTkButton(header, text="Help", command=self.show_help, **ghost).pack(side="right")
         ctk.CTkButton(header, text="Open output folder", command=self.open_output, **ghost).pack(side="right", padx=(0, 4))
         self.button = ctk.CTkButton(
-            header, text="Search", command=self.start, fg_color=VIOLET, hover_color=VIOLET_HOVER,
-            text_color="#FFFFFF", text_color_disabled="#CFC6F5", font=f["body_bold"], corner_radius=10, height=36, width=120,
+            header, text="Search", command=self.press, fg_color=VIOLET, hover_color=VIOLET_HOVER,
+            text_color="#FFFFFF", font=f["body_bold"], corner_radius=10, height=36, width=120,
         )
         self.button.pack(side="left", padx=(22, 0))
         self.bind("<Return>", lambda _: self.start())
@@ -484,6 +486,7 @@ class App(ctk.CTk):
         self.log_toggle.configure(text="Hide log" if self.log_open else "Show log")
 
     def log(self, message):
+        self.resume.wait()
         self.events.put(("log", message))
 
     def set_info(self, text):
@@ -512,6 +515,7 @@ class App(ctk.CTk):
         window.after(100, window.lift)
 
     def report(self, fraction, text=""):
+        self.resume.wait()
         self.events.put(("progress", (fraction, text)))
 
     def set_progress(self, fraction, text):
@@ -537,6 +541,18 @@ class App(ctk.CTk):
             return None
         return value
 
+    def press(self):
+        if not self.running:
+            self.start()
+        elif self.resume.is_set():
+            self.resume.clear()
+            self.button.configure(text="Resume", fg_color=GOLD, hover_color=GOLD, text_color=VOID)
+            self.status.configure(text="Paused at the next step, press Resume to go on", text_color=GOLD)
+        else:
+            self.resume.set()
+            self.button.configure(text="Pause", fg_color=LINE, hover_color=RAISED, text_color="#FFFFFF")
+            self.status.configure(text="Resuming", text_color=FG)
+
     def start(self):
         if self.running:
             return
@@ -550,7 +566,8 @@ class App(ctk.CTk):
         if None in (sectors, signals, sde):
             return
         self.running = True
-        self.button.configure(state="disabled", text="Searching", fg_color=LINE)
+        self.resume.set()
+        self.button.configure(text="Pause", fg_color=LINE, hover_color=RAISED, text_color="#FFFFFF")
         self.transit.set(0, instant=True)
         self.set_progress(0, f"Starting {target}")
         self.clear_rows()
@@ -582,7 +599,8 @@ class App(ctk.CTk):
 
     def finish(self):
         self.running = False
-        self.button.configure(state="normal", text="Search", fg_color=VIOLET)
+        self.resume.set()
+        self.button.configure(text="Search", fg_color=VIOLET, hover_color=VIOLET_HOVER, text_color="#FFFFFF")
 
     def clear_rows(self):
         self.chosen = None
