@@ -17,7 +17,7 @@ def save_survey(tic, entry):
     core.save_index(index)
 
 
-HEADER = ["tic", "signal", "period_d", "depth_ppm", "duration_h", "sde", "transits", "snr", "neighbors_that_could_fake_it", "catalog_notes", "pixel_check", "plot", "shared_period_with", "exofop_notes", "other_sectors"]
+HEADER = ["tic", "signal", "period_d", "depth_ppm", "duration_h", "sde", "transits", "snr", "neighbors_that_could_fake_it", "catalog_notes", "pixel_check", "plot", "shared_period_with", "exofop_notes", "other_sectors", "gaia_notes"]
 SHARED_TOLERANCE = 0.03
 SIGNAL_TOLERANCE = 0.002
 NOT_SHARED = ("known", "alias of", "repeat of")
@@ -73,6 +73,7 @@ def append_candidates(tic, signals):
                 "unchecked" if s.get("pixels") is None else s["pixels"]["verdict"], s["path"], "",
                 "unchecked" if s.get("exofop") is None else " | ".join(s["exofop"]),
                 "unchecked" if s.get("recheck") is None else s["recheck"]["verdict"],
+                "unchecked" if s.get("gaia") is None else " | ".join(s["gaia"]),
             ])
 
 

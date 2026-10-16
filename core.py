@@ -19,6 +19,7 @@ from astroquery.mast import Catalogs, Observations
 from astroquery.mast import conf as mast_conf
 from astroquery.exceptions import RemoteServiceError
 from astroquery.simbad import conf as simbad_conf
+from lightkurve.utils import LightkurveError
 
 mast_conf.timeout = 120
 simbad_conf.timeout = 120
@@ -67,6 +68,11 @@ RECHECK_CONTROLS = (0.79, 0.83, 0.87, 0.91, 0.94, 1.06, 1.09, 1.13, 1.17, 1.21)
 NEIGHBOR_RADIUS = 120
 TESS_PIXEL = 21
 TESS_BLUR = 2.0
+RV_PVALUE = 0.01
+RV_GOF = 4.0
+RV_MIN_VISITS = 10
+RUWE_LIMIT = 1.4
+GAIA_COLUMNS = {"rv_p": "RVchi2", "rv_gof": "RVgof", "rv_amp": "RVamp", "rv_visits": "RVNper", "ruwe": "RUWE", "nss": "NSS"}
 GRID_HALF = 5
 PIXEL_SNR = 4.0
 SATURATION_TMAG = 7.5
@@ -168,6 +174,28 @@ def cadence_rank(row):
     return (str(row["author"]) != "SPOC", abs(float(row["exptime"]) - 120))
 
 
+def cached_path(result):
+    row = result.table[0]
+    return mast_dir() / str(row["obs_id"]) / str(row["productFilename"])
+
+
+def fetch_curve(result, log=print, **kwargs):
+    try:
+        return retry(lambda: result.download(**kwargs), log, limit=DOWNLOAD_LIMIT)
+    except LightkurveError as e:
+        log(f"Light curve on disk is damaged, downloading it again: {e}")
+        cached_path(result).unlink(missing_ok=True)
+        return retry(lambda: result.download(**kwargs), log, limit=DOWNLOAD_LIMIT)
+
+
+def read_local(paths, log=print):
+    try:
+        return [lk.read(path) for path in paths]
+    except LightkurveError as e:
+        log(f"Light curve on disk is damaged: {e}")
+        return None
+
+
 def download(target, max_sectors, log=print, progress=quiet):
     index = load_index()
     tic = resolve_tic(target, index)
@@ -176,9 +204,11 @@ def download(target, max_sectors, log=print, progress=quiet):
     if len(chosen) >= max_sectors and chosen[-1] - chosen[0] <= 2 * (max_sectors - 1):
         log(f"Found sectors {', '.join(map(str, chosen))} on disk for TIC {tic} - no download needed")
         progress(1, "Loading from disk")
-        lc = stitch([lk.read(on_disk[sector]) for sector in chosen])
-        lc.meta["SECTORS"] = chosen
-        return lc
+        curves = read_local([on_disk[sector] for sector in chosen], log)
+        if curves is not None:
+            lc = stitch(curves)
+            lc.meta["SECTORS"] = chosen
+            return lc
     if on_disk:
         log(f"Have {len(on_disk)} sector(s) on disk - checking the archive for a closer-together set")
 
@@ -202,12 +232,13 @@ def download(target, max_sectors, log=print, progress=quiet):
         i = best[sector]
         row = table[i]
         path = mast_dir() / str(row["obs_id"]) / str(row["productFilename"])
-        if path.exists():
+        local = read_local([path], log) if path.exists() else None
+        if local is not None:
             progress(n / len(chosen), f"Light curve {n + 1}/{len(chosen)} already on disk")
-            curves.append(lk.read(path))
+            curves += local
         else:
             progress(n / len(chosen), f"Downloading light curve {n + 1}/{len(chosen)}")
-            curves.append(retry(lambda: results[i].download(), log, limit=DOWNLOAD_LIMIT))
+            curves.append(fetch_curve(results[i], log))
             fresh += 1
     log(f"Used {len(chosen) - fresh} light curve(s) from disk, downloaded {fresh}")
     progress(1, "Stitching light curves")
@@ -719,7 +750,7 @@ def gaia_neighbors(star, log=print):
         return None
     index = load_index()
     cached = index.setdefault("neighbors", {}).get(str(star["tic"]))
-    if cached and all(len(s) >= 4 for s in cached["others"]):
+    if cached and "gaia" in cached and all(len(s) >= 4 for s in cached["others"]):
         return cached
     try:
         import astropy.units as u
@@ -727,12 +758,12 @@ def gaia_neighbors(star, log=print):
         from astroquery.vizier import Vizier
 
         center = SkyCoord(star["ra"], star["dec"], unit="deg")
-        vizier: Any = Vizier(columns=["RA_ICRS", "DE_ICRS", "RAJ2000", "DEJ2000", "Gmag", "RPmag"], row_limit=-1)
+        vizier: Any = Vizier(columns=["RA_ICRS", "DE_ICRS", "RAJ2000", "DEJ2000", "Gmag", "RPmag", *GAIA_COLUMNS.values()], row_limit=-1)
         tables = vizier.query_region(center, radius=NEIGHBOR_RADIUS * u.arcsec, catalog="I/355/gaiadr3")
     except Exception as e:
         log(f"Could not check nearby stars: {e}")
         return None
-    stars = []
+    stars, rows = [], []
     if tables:
         table = tables[0]
         ra = np.where(np.ma.getmaskarray(table["RAJ2000"]), table["RA_ICRS"], table["RAJ2000"])
@@ -742,16 +773,36 @@ def gaia_neighbors(star, log=print):
             mag = row["RPmag"] if not np.ma.is_masked(row["RPmag"]) else row["Gmag"]
             if not np.ma.is_masked(mag):
                 stars.append([float(sep), float(mag), float(r), float(d)])
+                rows.append(row)
     close = [s for s in stars if s[0] < 10]
     if not close:
         log("Could not find the star itself in Gaia - skipping the nearby-star check")
         return None
     guess = star["tmag"] if star["tmag"] is not None else min(s[1] for s in close)
     target = min(close, key=lambda s: abs(s[1] - guess) + s[0] / 10)
-    result = {"mag": target[1], "others": sorted(s for s in stars if s is not target)}
+    row = rows[stars.index(target)]
+    gaia = {key: None if np.ma.is_masked(row[column]) else float(row[column]) for key, column in GAIA_COLUMNS.items()}
+    result = {"mag": target[1], "others": sorted(s for s in stars if s is not target), "gaia": gaia}
     index["neighbors"][str(star["tic"])] = result
     save_index(index)
     return result
+
+
+def gaia_check(neighbors):
+    gaia = neighbors.get("gaia") or {}
+    notes = []
+    visits = gaia.get("rv_visits") or 0
+    if gaia.get("rv_p") is not None and visits >= RV_MIN_VISITS:
+        if gaia["rv_p"] < RV_PVALUE and (gaia.get("rv_gof") is None or gaia["rv_gof"] > RV_GOF):
+            amp = gaia.get("rv_amp")
+            notes.append(f"Gaia radial velocity varies{f' by {amp:.0f} km/s' if amp is not None else ''} over {visits:.0f} visits - likely a binary star (a planet moves it by m/s, not km/s)")
+        else:
+            notes.append(f"Gaia radial velocity steady over {visits:.0f} visits - no sign of a close stellar companion")
+    if gaia.get("nss"):
+        notes.append("Gaia lists it as a non-single star (it has an orbit solution)")
+    if gaia.get("ruwe") is not None and gaia["ruwe"] > RUWE_LIMIT:
+        notes.append(f"Gaia RUWE {gaia['ruwe']:.1f} - its position wobbles, possibly an unseen companion")
+    return notes
 
 
 def blend_check(signal, neighbors):
@@ -1030,7 +1081,7 @@ def recheck(signal, star, log=print, flat=None):
     curves = []
     for sector in chosen:
         try:
-            lc = retry(lambda: found[best[sector]].download(quality_bitmask="default"), log, limit=DOWNLOAD_LIMIT)
+            lc = fetch_curve(found[best[sector]], log, quality_bitmask="default")
         except Exception as e:
             log(f"Could not download sector {sector}: {e}")
             continue
@@ -1227,6 +1278,7 @@ def ctoi_notes(signal, star):
         )
     else:
         parts.append(f"no Gaia neighbor within {NEIGHBOR_RADIUS}\" bright enough to cause it")
+    parts.extend(signal.get("gaia") or [])
     exofop = signal.get("exofop")
     if exofop is None:
         parts.append("ExoFOP CTOI list not checked")
@@ -1441,7 +1493,9 @@ def pixel_check(signal, star, log=print, max_sectors=4, neighbors=None, enough=6
         tpf = None
         for fresh in (False, True):
             try:
-                tpf = limited(lambda: found[i].download(quality_bitmask="default", cache=not fresh), DOWNLOAD_LIMIT)
+                if fresh:
+                    cached_path(found[i]).unlink(missing_ok=True)
+                tpf = limited(lambda: found[i].download(quality_bitmask="default"), DOWNLOAD_LIMIT)
                 if tpf is None:
                     raise ValueError("the archive returned no file")
                 tpf.flux.shape
@@ -1610,6 +1664,8 @@ def describe(signal, star):
                 f"it would only have to dim by {worst['needed']:.{0 if worst['needed'] >= 0.1 else 1}%}. Ground-based telescopes with sharper vision can "
                 "tell which star the dip is on."
             )
+    for note in signal.get("gaia") or []:
+        lines.append(f"GAIA {note}.")
     if "recheck" in signal:
         lines.append(f"RECHECK {recheck_words(signal['recheck'])}")
     if "pixels" in signal:
@@ -1785,6 +1841,7 @@ def run(target, sectors=10, max_signals=3, min_sde=7.0, log=print, progress=quie
             if neighbors is False:
                 neighbors = gaia_neighbors(star, log)
             signal["blends"] = None if neighbors is None else blend_check(signal, neighbors)
+            signal["gaia"] = None if neighbors is None else gaia_check(neighbors)
             plots((i - 1) / len(signals), "Downloading TESS pixel images for the pixel check")
             signal["pixels"] = pixel_check(signal, star, log, neighbors=neighbors or None)
             if signal["pixels"] and signal["pixels"]["verdict"] == "off target":

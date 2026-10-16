@@ -32,7 +32,7 @@ NEBULA = "#4A2A7A"
 ROSE = "#7A2D6B"
 EXAMPLES = ["Pi Mensae", "TOI-700", "LHS 3844", "WASP-18", "Proxima Centauri", "TIC 261136679"]
 HEADINGS = {"How this works", "The three plots", "The words", "The options", "Status colors"}
-KEY = re.compile(r"^(ORBIT|DIP|SIZE|LENGTH|COUNT|SDE|SNR|EXOFOP|CATALOGS|NEIGHBORS|RECHECK|PIXELS|VERDICT|STAR)\b")
+KEY = re.compile(r"^(ORBIT|DIP|SIZE|LENGTH|COUNT|SDE|SNR|EXOFOP|CATALOGS|NEIGHBORS|GAIA|RECHECK|PIXELS|VERDICT|STAR)\b")
 HELP = """How this works
 
 When a planet passes in front of its star, it blocks a tiny bit of light.
